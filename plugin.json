@@ -1,7 +1,7 @@
 {
 	"ver": 1,
 	"name": "Move To",
-	"icon": "ti-send",
-	"version": "1.2.0",
-	"description": "Move the current line, a whole block (parent + children), or the entire selection to any page, heading, or line — with a fast search picker anchored at your caret."
+	"icon": "ti-file-arrow-right",
+	"version": "1.3.0",
+	"description": "Move a line, a whole block, or your selection to any page, heading, line, or a new note; and move whole pages between collections from any table, board, or gallery view."
 }

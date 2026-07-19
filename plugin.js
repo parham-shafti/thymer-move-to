@@ -110,6 +110,34 @@ const CSS = `
 .mv-ibtn.mv-on { color: var(--mv-accent, #3aa37f); border-color: var(--mv-accent, #3aa37f); }
 .mv-hint { opacity: .5; font-size: 11px; margin-left: auto; }
 
+/* ---- page-move selection mode (table / board / gallery views) ---- */
+/* table rows: a left accent bar reads cleanest on a full-width row */
+.mv-row-selected {
+	background: rgba(127,127,127,.14) !important;
+	box-shadow: inset 3px 0 0 var(--mv-accent, #4caea1);
+}
+/* board + gallery cards: an accent ring around the box (outline doesn't shift
+   layout, and offset keeps it inside the card's own rounded corners) */
+.mv-card-selected {
+	outline: 2px solid var(--mv-accent, #4caea1) !important;
+	outline-offset: -1px;
+	background: rgba(127,127,127,.10) !important;
+}
+.mv-bar {
+	position: fixed; z-index: 99998;
+	display: flex; align-items: center; gap: 10px;
+	padding: 7px 8px 7px 14px; border-radius: var(--radius-larger, 10px);
+	background: var(--cmdpal-bg-color, var(--mv-surface, #26262b));
+	color: var(--cmdpal-fg-color, var(--text-color, #ddd));
+	font-family: var(--font-mono, inherit); font-size: var(--text-size-small, .875rem);
+	border: 1px solid var(--mv-border, rgba(127,127,127,.4));
+	box-shadow: var(--mv-shadow, 0 16px 48px rgba(0,0,0,.5));
+	user-select: none;
+}
+.mv-bar .mv-count { font-weight: var(--font-weight-bold, 700); }
+.mv-bar .mv-barhint { opacity: .5; font-size: 11px; }
+.mv-bar .mv-btn { height: 26px; padding: 0 10px; font-size: 12px; }
+
 .mv-settings-backdrop {
 	position: fixed; inset: 0; z-index: 100000;
 	background: rgba(0,0,0,.45); backdrop-filter: blur(2px);
@@ -170,22 +198,30 @@ class Plugin extends AppPlugin {
 	destOpts = [];
 	destSel = 0;
 	moving = false;
-	collMap = {};           // collection guid -> {name, icon} (built on picker open)
+	newNoteMode = false;    // picker is in "type a title for a new note" state (PR #1)
+	collMap = {};           // collection guid -> {name, icon, isJournal} (built on picker open)
 	recordsCache = [];      // all workspace records, snapshotted on picker open
 	linePreviewEl = null;   // floating full-text preview shown on line hover
+	cmd3 = null;
+	pageMode = null;        // { selected:Set<guid>, container, rowSelector, kind, barEl, collGuid, handlers, keyHandler, observer, lastIdx, single }
 
 	onLoad() {
 		this.loadSettings();
 		this.ui.injectCSS(CSS);
 		this.cmd = this.ui.addCommandPaletteCommand({
 			label: 'Move to…',
-			icon: 'ti-send',
+			icon: 'ti-file-arrow-right',
 			onSelected: () => this.open(),
 		});
 		this.cmd2 = this.ui.addCommandPaletteCommand({
 			label: 'Move To: Set Shortcut',
 			icon: 'ti-keyboard',
 			onSelected: () => this.openSettings(),
+		});
+		this.cmd3 = this.ui.addCommandPaletteCommand({
+			label: 'Move pages…',
+			icon: 'ti-folder',
+			onSelected: () => this.startPageMove(),
 		});
 		this.hotkeyHandler = (e) => {
 			if (!this.matchesHotkey(e)) return;
@@ -194,7 +230,20 @@ class Plugin extends AppPlugin {
 			// moving the scratch line. Deterministic regardless of plugin load order.
 			if (document.querySelector('.panel[data-qc-modal]')) return;
 			e.preventDefault(); e.stopPropagation();
-			if (this.popEl) this.close();
+			// a picker is open → the shortcut closes it. In page mode that drops
+			// back to the selection (keep the selection so you can re-pick); for the
+			// line/block picker it also hands focus back to the editor.
+			if (this.popEl) { if (this.pageMode) this.close(true); else this.close(); return; }
+			// in page-selection mode the shortcut advances: with pages selected it
+			// opens the collection picker straight away, with none it exits the mode
+			if (this.pageMode) {
+				if (this.pageMode.selected.size) this.openCollectionPicker();
+				else this.exitPageMode();
+				return;
+			}
+			// context-aware: a collection view (table/board/gallery) in the active
+			// panel → page mode, otherwise the usual line/block/selection picker
+			if (this.activeOverviewSurface()) this.startPageMove();
 			else this.open();
 		};
 		window.addEventListener('keydown', this.hotkeyHandler, true);
@@ -202,11 +251,13 @@ class Plugin extends AppPlugin {
 
 	onUnload() {
 		this.close(true);
+		this.exitPageMode();
 		this.closeSettings();
 		if (this.hotkeyHandler) { window.removeEventListener('keydown', this.hotkeyHandler, true); this.hotkeyHandler = null; }
 		try { if (this.cmd) this.cmd.remove(); } catch (e) {}
 		try { if (this.cmd2) this.cmd2.remove(); } catch (e) {}
-		this.cmd = this.cmd2 = null;
+		try { if (this.cmd3) this.cmd3.remove(); } catch (e) {}
+		this.cmd = this.cmd2 = this.cmd3 = null;
 	}
 
 	matchesHotkey(e) {
@@ -482,7 +533,7 @@ class Plugin extends AppPlugin {
 		pop.style.setProperty('--mv-accent', this.accentColor());
 		pop.innerHTML = `
 			<div class="mv-head">
-				<span class="ti ti-send"></span>
+				<span class="ti ti-file-arrow-right"></span>
 				<span class="mv-title"></span>
 				<button class="mv-scope" style="display:none"></button>
 				<span class="mv-x" title="Close"><span class="ti ti-x"></span></span>
@@ -521,6 +572,7 @@ class Plugin extends AppPlugin {
 		this.renderDefaultDestOptions(list);
 		input.addEventListener('input', () => {
 			clearTimeout(this.searchTimer);
+			if (this.newNoteMode) return;   // in new-note mode the input is the note title, not a search
 			const q = input.value.trim();
 			this.searchTimer = setTimeout(() => this.runDestSearch(q, list), 180);
 		});
@@ -594,8 +646,8 @@ class Plugin extends AppPlugin {
 		if (!btn || btn.style.display === 'none') return;
 		btn.classList.toggle('mv-on', this.blockScope);
 		btn.innerHTML = this.blockScope
-			? '<span class="ti ti-binary-tree"></span>Whole block'
-			: '<span class="ti ti-minus"></span>Line only';
+			? '<span class="ti ti-list-tree"></span>Whole block'
+			: '<span class="ti ti-align-left"></span>Line only';
 		btn.title = this.blockScope
 			? 'Moving the line with all its children (click to move only the line — children stay, promoted one level)'
 			: 'Moving only this line — its children stay, promoted one level (click to move the whole block)';
@@ -615,6 +667,7 @@ class Plugin extends AppPlugin {
 		clearTimeout(this.searchTimer);
 		this.searchToken++;
 		this.destOpts = []; this.destSel = 0;
+		this.newNoteMode = false;
 		this.hideLinePreview();
 		if (this.outsideHandler) { document.removeEventListener('pointerdown', this.outsideHandler, true); this.outsideHandler = null; }
 		if (this.popEl) { this.popEl.remove(); this.popEl = null; }
@@ -657,16 +710,20 @@ class Plugin extends AppPlugin {
 		list.appendChild(h);
 	}
 
-	// collection guid -> {name, icon}, for the "which collection" result labels
+	// collection guid -> {name, icon, isJournal, hidden, api}, for result labels
+	// and as the target list of the page-move collection picker
 	async loadCollMap() {
 		try {
 			const cols = await this.data.getAllCollections();
 			const m = {};
 			for (const c of (cols || [])) {
 				let g = null; try { g = c._getRow ? c._getRow().guid : (c.guid || null); } catch (e) {}
+				if (!g && c.getGuid) { try { g = c.getGuid(); } catch (e) {} }
 				let n = ''; try { n = c.getName ? c.getName() : ''; } catch (e) {}
 				let ic = ''; try { ic = (c.getIcon && c.getIcon()) || ''; } catch (e) {}
-				if (g) m[g] = { name: n, icon: ic };
+				let ij = false; try { ij = !!(c.isJournalPlugin && c.isJournalPlugin()); } catch (e) {}
+				let hid = false; try { const sd = (c.getConfiguration() || {}).sidebar_display_mode; hid = !!(sd && sd.mode === 'hidden_completely'); } catch (e) {}
+				if (g) m[g] = { name: n, icon: ic, isJournal: ij, hidden: hid, api: c };
 			}
 			this.collMap = m;
 		} catch (e) {}
@@ -747,7 +804,81 @@ class Plugin extends AppPlugin {
 		journal.className = 'mv-opt';
 		journal.innerHTML = `<span class="ti ti-calendar-event"></span><span class="mv-opt-text">Today's Journal</span><span class="mv-opt-sub">bottom</span>`;
 		this.addDestOpt(list, journal, () => this.moveNow({ kind: 'journal' }));
+		const newNote = document.createElement('div');
+		newNote.className = 'mv-opt';
+		newNote.innerHTML = `<span class="ti ti-file-plus"></span><span class="mv-opt-text">New note in a collection…</span>`;
+		this.addDestOpt(list, newNote, () => this.pickNewNote(list));
 		this.sec(list, 'Type to search pages, lines, or a date');
+	}
+
+	// New-note flow (community PR #1, phildrysdale1): type a title, pick a
+	// collection, and the moved content becomes the body of a freshly created
+	// note in that collection.
+	async pickNewNote(list) {
+		const input = this.popEl && this.popEl.querySelector('.mv-input');
+		if (!input) return;
+		clearTimeout(this.searchTimer);
+		const my = ++this.searchToken;
+		this.newNoteMode = true;
+		input.value = '';
+		input.placeholder = 'Enter a title for the new note…';
+		this.resetDestList(list);
+		this.newNoteMode = true;   // resetDestList doesn't touch it, but keep intent explicit
+		this.sec(list, 'Loading collections…');
+		input.focus();
+
+		let collections = [];
+		try { collections = await this.data.getAllCollections(); } catch (e) {}
+		if (!this.popEl || !this.newNoteMode || my !== this.searchToken) return;
+		collections = (collections || []).filter((c) => {
+			try {
+				if (!c || typeof c.createRecord !== 'function') return false;
+				if (c.isJournalPlugin && c.isJournalPlugin()) return false;
+				// skip plugin-internal collections hidden from the sidebar (e.g. the
+				// Quick Capture scratch collection) — never a real note destination
+				const sd = (c.getConfiguration() || {}).sidebar_display_mode;
+				if (sd && sd.mode === 'hidden_completely') return false;
+				return true;
+			} catch (e) { return false; }
+		});
+
+		this.resetDestList(list);
+		this.newNoteMode = true;
+		this.sec(list, 'New note');
+		const back = document.createElement('div');
+		back.className = 'mv-opt';
+		back.innerHTML = `<span class="ti ti-arrow-left"></span><span class="mv-opt-text">Back to destinations</span>`;
+		this.addDestOpt(list, back, () => {
+			this.newNoteMode = false;
+			this.searchToken++;
+			input.value = '';
+			input.placeholder = 'Search pages, lines, or a date for the Journal (e.g. "tomorrow")…';
+			this.renderDefaultDestOptions(list);
+			input.focus();
+		});
+		this.sec(list, 'Choose a collection');
+		let firstCollectionIdx = null;
+		for (const c of collections) {
+			let name = 'Collection', icon = 'ti-files';
+			try { name = c.getName() || name; } catch (e) {}
+			try { const conf = c.getConfiguration(); icon = (c.getIcon && c.getIcon()) || (conf && conf.icon) || icon; } catch (e) {}
+			if (!icon.startsWith('ti-')) icon = 'ti-' + icon;
+			const opt = document.createElement('div');
+			opt.className = 'mv-opt';
+			opt.innerHTML = `<span class="ti ${esc(icon)}"></span><span class="mv-opt-text">${esc(name)}</span>`;
+			if (firstCollectionIdx === null) firstCollectionIdx = this.destOpts.length;
+			this.addDestOpt(list, opt, () => {
+				const title = input.value.trim();
+				if (!title) { this.toast('Enter a title for the new note.'); input.focus(); return; }
+				this.moveNow({ kind: 'new', collection: c, name: title, collectionName: name });
+			});
+		}
+		if (firstCollectionIdx === null) {
+			const empty = document.createElement('div'); empty.className = 'mv-opt'; empty.textContent = 'No collections available';
+			list.appendChild(empty);
+		} else {
+			this.setDestSel(firstCollectionIdx);
+		}
 	}
 
 	// Search pages by NAME (over the snapshotted record set, like the native @
@@ -917,18 +1048,18 @@ class Plugin extends AppPlugin {
 		// Top is listed first but Bottom stays the default (see setDestSel below).
 		const top = document.createElement('div');
 		top.className = 'mv-opt';
-		top.innerHTML = `<span class="ti ti-arrow-bar-to-up"></span><span class="mv-opt-text">Top of page</span>`;
+		top.innerHTML = `<span class="ti ti-arrow-up"></span><span class="mv-opt-text">Top of page</span>`;
 		this.addDestOpt(list, top, () => this.moveNow({ kind: 'page', guid, name, atTop: true }));
 		const bottomIdx = this.destOpts.length;
 		const bottom = document.createElement('div');
 		bottom.className = 'mv-opt';
-		bottom.innerHTML = `<span class="ti ti-arrow-bar-to-down"></span><span class="mv-opt-text">Bottom of page</span><span class="mv-opt-sub">default</span>`;
+		bottom.innerHTML = `<span class="ti ti-arrow-down"></span><span class="mv-opt-text">Bottom of page</span><span class="mv-opt-sub">default</span>`;
 		this.addDestOpt(list, bottom, () => this.moveNow({ kind: 'page', guid, name }));
 		for (const h of headings) {
 			if (!h.guid) continue;
 			const opt = document.createElement('div');
 			opt.className = 'mv-opt mv-indent-' + Math.min(2, Math.max(0, (h.size || 1) - 1));
-			opt.innerHTML = `<span class="ti ti-heading"></span><span class="mv-opt-text">${esc(h.text || 'Heading')}</span>`;
+			opt.innerHTML = `<span class="ti ti-h-1"></span><span class="mv-opt-text">${esc(h.text || 'Heading')}</span>`;
 			this.addDestOpt(list, opt, () => this.moveNow({ kind: 'page', guid, name, afterHeadingGuid: h.guid, headingText: h.text }));
 		}
 		// keep Bottom highlighted as the default (Enter picks it) even though Top is first
@@ -1019,7 +1150,22 @@ class Plugin extends AppPlugin {
 		const indent = !!this.indentUnder;
 		const notMoved = (li) => !movedSet.has(liGuid(li));
 		try {
-			if (dest.kind === 'journal') {
+			if (dest.kind === 'new') {
+				// create the note, then wait for it to be queryable (createRecord's
+				// result is only readable a beat later — same pattern as Quick
+				// Capture's scratch page). NOTE vs PR #1: createRecord must be
+				// awaited here (it returns a Promise in this runtime) and the record
+				// is polled via data.getRecord, not matched by a .guid field.
+				let guid = null;
+				try { guid = await dest.collection.createRecord(dest.name); } catch (e) {}
+				if (!guid) { this.toast('Could not create the new note in that collection.'); return; }
+				destRec = this.data.getRecord(guid);
+				for (let i = 0; !destRec && i < 16; i++) { await wait(120); destRec = this.data.getRecord(guid); }
+				if (!destRec) { this.toast('The new note was created but could not be loaded.'); return; }
+				destLabel = dest.name + (dest.collectionName ? ' · ' + dest.collectionName : '');
+				parentTarget = destRec;
+				anchor = null;
+			} else if (dest.kind === 'journal') {
 				destRec = await this.resolveJournalRecord(dest.date);
 				if (!destRec) { this.toast('No Journal found in this workspace — pick a page instead.'); return; }
 				destLabel = dest.dateLabel ? ('the Journal, ' + dest.dateLabel) : "today's Journal";
@@ -1093,7 +1239,10 @@ class Plugin extends AppPlugin {
 		}
 
 		this.close();
-		if (!moved) { this.toast('Nothing was moved.'); return; }
+		if (!moved) {
+			if (dest.kind === 'new') { try { await destRec.trash(); } catch (e) {} }   // don't leave an empty note behind
+			this.toast('Nothing was moved.'); return;
+		}
 		const firstGuid = scope.roots.find((g) => movedGuids.has(g)) || null;
 		const destGuid = rowGuid(destRec);
 		const n = lineOnly ? 1 : scope.totalLines;
@@ -1133,6 +1282,320 @@ class Plugin extends AppPlugin {
 
 	toast(message, opts) {
 		try { this.ui.addToaster({ title: 'Move To', message, dismissible: true, autoDestroyTime: 2600, ...(opts || {}) }); } catch (e) {}
+	}
+
+	// ---- page move: select pages in a collection view, send them to a collection ----
+	//
+	// Table rows / board cards / gallery cards all carry the record guid on the
+	// element (data-guid). Selection mode intercepts pointerdown on them in the
+	// CAPTURE phase and calls preventDefault() — the spec then suppresses the
+	// derived mouse events (mousedown/click), which is what actually stops Thymer
+	// from opening the record. Records move with record.moveToCollection();
+	// property values that have no field in the target collection stop being
+	// shown but stay stored (verified: they reappear if the page is moved back).
+
+	// The collection views we can select in, most-specific container first. Each
+	// exposes its items as elements carrying data-guid (the record guid).
+	overviewSurfaces() {
+		return [
+			{ kind: 'table', container: '.table-view', row: '.table-view-row[data-guid]' },
+			{ kind: 'board', container: '.boards-view', row: '.board-card[data-guid]' },
+			{ kind: 'gallery', container: '.gallery-view', row: '.gallery-view-card[data-guid]' },
+		];
+	}
+
+	// The overview surface inside the ACTIVE panel (null when none is visible
+	// there). Returns { container, rowSelector, kind }.
+	activeOverviewSurface() {
+		const find = (root) => {
+			for (const s of this.overviewSurfaces()) {
+				const c = root.querySelector(s.container);
+				if (c && c.querySelector(s.row)) return { container: c, rowSelector: s.row, kind: s.kind };
+			}
+			return null;
+		};
+		try {
+			const p = this.ui.getActivePanel();
+			const el = p && p.getElement && p.getElement();
+			const panel = el ? (el.closest('.panel') || el) : null;
+			if (panel) { const s = find(panel); if (s) return s; }
+		} catch (e) {}
+		// fallback: exactly one panel with a recognised surface → unambiguous
+		const panels = [...document.querySelectorAll('.panel')].map((p) => find(p)).filter(Boolean);
+		return panels.length === 1 ? panels[0] : null;
+	}
+
+	// the selection tint class per surface: a left accent bar reads best on full-
+	// width table rows, an accent ring on box-like board/gallery cards
+	selClass(kind) { return kind === 'table' ? 'mv-row-selected' : 'mv-card-selected'; }
+
+	// Entry point for the "Move pages…" command: an open page moves directly,
+	// a collection view (table / board / gallery) enters selection mode.
+	async startPageMove() {
+		if (this.pageMode || this.popEl) return;
+		await this.loadCollMap();
+		const nav = (() => { try { return this.ui.getActivePanel().getNavigation() || {}; } catch (e) { return {}; } })();
+		const surface = this.activeOverviewSurface();
+		if (!surface && nav.type === 'edit_panel' && nav.rootId) {
+			// a page is open — move THAT page, no selection step
+			const rec = this.data.getRecord(nav.rootId);
+			if (!rec) { this.toast('No page here to move.'); return; }
+			const collGuid = this.collGuidOf(rec);
+			if (this.collMap[collGuid] && this.collMap[collGuid].isJournal) { this.toast("Journal pages can't be moved to a collection."); return; }
+			const pm = { selected: new Set([nav.rootId]), single: true, collGuid, container: null, rowSelector: null, kind: 'single', barEl: null, handlers: [], keyHandler: null, observer: null, lastIdx: null };
+			// Escape cancels single-page mode too (no bar/selection UI here, just the
+			// picker). exitPageMode removes this handler.
+			pm.keyHandler = (e) => {
+				if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); if (this.popEl) this.close(true); this.exitPageMode(); }
+			};
+			window.addEventListener('keydown', pm.keyHandler, true);
+			this.pageMode = pm;
+			this.openCollectionPicker();
+			return;
+		}
+		if (!surface) { this.toast('Open a collection view (table, board, or gallery) or a page first.'); return; }
+		this.enterPageMode(surface);
+	}
+
+	enterPageMode(surface) {
+		const { container, rowSelector, kind } = surface;
+		const rows = container.querySelectorAll(rowSelector);
+		if (!rows.length) { this.toast('No pages in this view.'); return; }
+		// the view's own collection (excluded from the target list)
+		let collGuid = null;
+		try { collGuid = this.collGuidOf(this.data.getRecord(rows[0].getAttribute('data-guid'))); } catch (e) {}
+
+		const pm = { selected: new Set(), single: false, collGuid, container, rowSelector, kind, barEl: null, handlers: [], keyHandler: null, observer: null, lastIdx: null };
+		this.pageMode = pm;
+
+		// floating action bar, bottom-center of the view's panel
+		const bar = document.createElement('div');
+		bar.className = 'mv-bar';
+		bar.style.setProperty('--mv-surface', this.themeSurfaceColor());
+		bar.style.setProperty('--mv-border', this.themeBorderColor());
+		bar.style.setProperty('--mv-shadow', this.themeShadow());
+		bar.style.setProperty('--mv-accent', this.accentColor());
+		const noun = kind === 'table' ? 'rows' : 'cards';
+		bar.innerHTML = `
+			<span><span class="mv-count">0</span> selected</span>
+			<span class="mv-barhint">click ${noun} · shift-click for range · ↵ or ${esc(this.hotkeyLabel())} to move</span>
+			<button class="mv-btn mv-primary mv-bar-move">Move to…</button>
+			<button class="mv-btn mv-bar-cancel">Cancel</button>`;
+		document.body.appendChild(bar);
+		pm.barEl = bar;
+		const panel = container.closest('.panel');
+		const pr = panel ? panel.getBoundingClientRect() : { left: 0, right: window.innerWidth };
+		bar.style.left = Math.round((pr.left + pr.right) / 2 - bar.offsetWidth / 2) + 'px';
+		bar.style.bottom = '18px';
+		bar.querySelector('.mv-bar-move').addEventListener('click', () => this.openCollectionPicker());
+		bar.querySelector('.mv-bar-cancel').addEventListener('click', () => this.exitPageMode());
+
+		// row/card clicks toggle selection instead of opening the record.
+		// preventDefault on pointerdown suppresses the derived mouse events;
+		// pointerup/click are blocked too as a belt-and-braces (some controls act
+		// on click, and cards have inner link/drag openers with their own guids).
+		const rowOf = (e) => {
+			const row = e.target && e.target.closest && e.target.closest(pm.rowSelector);
+			return row && pm.container.contains(row) ? row : null;
+		};
+		const onPointerDown = (e) => {
+			const row = rowOf(e);
+			if (!row) return;
+			e.preventDefault(); e.stopPropagation();
+			this.togglePageRow(row, e.shiftKey);
+		};
+		const onBlock = (e) => { if (rowOf(e)) { e.preventDefault(); e.stopPropagation(); } };
+		document.addEventListener('pointerdown', onPointerDown, true);
+		document.addEventListener('pointerup', onBlock, true);
+		document.addEventListener('click', onBlock, true);
+		pm.handlers = [['pointerdown', onPointerDown], ['pointerup', onBlock], ['click', onBlock]];
+
+		// Escape leaves selection mode; Enter proceeds to the picker. (Escape DOES
+		// reach JS here — unlike inside the editor, where Thymer swallows it — so a
+		// window-capture listener works. When the picker is open its input handles
+		// Escape instead; here we only act when it's closed.)
+		pm.keyHandler = (e) => {
+			if (e.key === 'Escape') {
+				// cancel: close the picker if it's open, then leave selection mode.
+				// Window-capture fires before the picker input, so stopPropagation
+				// keeps Thymer (and the input) from also acting on the Escape.
+				e.preventDefault(); e.stopPropagation();
+				if (this.popEl) this.close(true);
+				this.exitPageMode();
+				return;
+			}
+			if (this.popEl) return;   // the collection picker has its own keys
+			if (e.key === 'Enter' && !e.metaKey && !e.ctrlKey && !e.altKey) {
+				e.preventDefault(); e.stopPropagation();
+				this.openCollectionPicker();
+			}
+		};
+		window.addEventListener('keydown', pm.keyHandler, true);
+
+		// the view re-renders on scroll/sort (all three are virtualised) — re-apply
+		// the selection tint to whatever rows/cards are currently in the DOM
+		pm.observer = new MutationObserver(() => this.applyPageRowStyles());
+		pm.observer.observe(container, { childList: true, subtree: true });
+	}
+
+	exitPageMode() {
+		const pm = this.pageMode;
+		if (!pm) return;
+		this.pageMode = null;
+		try { if (pm.observer) pm.observer.disconnect(); } catch (e) {}
+		for (const [type, fn] of pm.handlers || []) document.removeEventListener(type, fn, true);
+		if (pm.keyHandler) window.removeEventListener('keydown', pm.keyHandler, true);
+		if (pm.barEl) pm.barEl.remove();
+		if (pm.container) for (const r of pm.container.querySelectorAll('.mv-row-selected, .mv-card-selected')) r.classList.remove('mv-row-selected', 'mv-card-selected');
+	}
+
+	togglePageRow(row, shiftKey) {
+		const pm = this.pageMode;
+		if (!pm) return;
+		const rows = [...pm.container.querySelectorAll(pm.rowSelector)];
+		const idx = rows.indexOf(row);
+		const guid = row.getAttribute('data-guid');
+		if (!guid) return;
+		if (shiftKey && pm.lastIdx !== null && idx >= 0) {
+			const [a, b] = pm.lastIdx <= idx ? [pm.lastIdx, idx] : [idx, pm.lastIdx];
+			for (let i = a; i <= b; i++) {
+				const g = rows[i] && rows[i].getAttribute('data-guid');
+				if (g) pm.selected.add(g);
+			}
+		} else if (pm.selected.has(guid)) {
+			pm.selected.delete(guid);
+		} else {
+			pm.selected.add(guid);
+		}
+		pm.lastIdx = idx;
+		this.applyPageRowStyles();
+	}
+
+	applyPageRowStyles() {
+		const pm = this.pageMode;
+		if (!pm || !pm.container) return;
+		const cls = this.selClass(pm.kind);
+		for (const r of pm.container.querySelectorAll(pm.rowSelector)) {
+			r.classList.toggle(cls, pm.selected.has(r.getAttribute('data-guid')));
+		}
+		const c = pm.barEl && pm.barEl.querySelector('.mv-count');
+		if (c) c.textContent = String(pm.selected.size);
+	}
+
+	// The destination chooser for pages: every regular collection except the
+	// current one (journals and plugin-internal hidden collections excluded).
+	openCollectionPicker() {
+		const pm = this.pageMode;
+		if (!pm || this.popEl) return;
+		if (!pm.selected.size) { this.toast('Select at least one page first.'); return; }
+
+		const cols = Object.entries(this.collMap)
+			.filter(([g, c]) => !c.isJournal && !c.hidden && g !== pm.collGuid && c.name)
+			.map(([g, c]) => ({ guid: g, ...c }));
+		if (!cols.length) { this.toast('No other collections to move to.'); return; }
+
+		const n = pm.selected.size;
+		const pop = document.createElement('div');
+		pop.className = 'mv-pop';
+		pop.style.setProperty('--mv-surface', this.themeSurfaceColor());
+		pop.style.setProperty('--mv-border', this.themeBorderColor());
+		pop.style.setProperty('--mv-shadow', this.themeShadow());
+		pop.style.setProperty('--mv-accent', this.accentColor());
+		pop.innerHTML = `
+			<div class="mv-head">
+				<span class="ti ti-folder"></span>
+				<span class="mv-title">Move ${n} page${n > 1 ? 's' : ''} to collection…</span>
+				<span class="mv-x" title="Close"><span class="ti ti-x"></span></span>
+			</div>
+			<input class="mv-input" type="text" placeholder="Search collections…" />
+			<div class="mv-list"></div>
+			<div class="mv-foot"><span class="mv-hint">↑↓ navigate · ↵ move · click outside to close</span></div>`;
+		document.body.appendChild(pop);
+		this.popEl = pop;
+
+		// centered over the view's panel (or the viewport in single-page mode)
+		const panel = pm.container ? pm.container.closest('.panel') : null;
+		const pr = panel ? panel.getBoundingClientRect() : { left: 0, right: window.innerWidth };
+		const r = pop.getBoundingClientRect();
+		pop.style.left = Math.round(Math.min(Math.max(8, (pr.left + pr.right) / 2 - r.width / 2), window.innerWidth - r.width - 8)) + 'px';
+		pop.style.top = Math.round(window.innerHeight * 0.18) + 'px';
+
+		const input = pop.querySelector('.mv-input');
+		const list = pop.querySelector('.mv-list');
+		const render = (q) => {
+			this.resetDestList(list);
+			const qn = mvNorm(q);
+			const hits = (qn ? cols.filter((c) => mvNorm(c.name).includes(qn)) : cols)
+				.slice()
+				.sort((a, b) => (qn ? mvNameScore(mvNorm(b.name), [qn]) - mvNameScore(mvNorm(a.name), [qn]) : 0) || a.name.localeCompare(b.name));
+			if (!hits.length) {
+				const e = document.createElement('div'); e.className = 'mv-opt'; e.textContent = 'No collections found';
+				list.appendChild(e);
+				return;
+			}
+			this.sec(list, 'Collections');
+			for (const c of hits.slice(0, 14)) {
+				const opt = document.createElement('div');
+				opt.className = 'mv-opt';
+				opt.innerHTML = `<span class="ti ${esc(c.icon || 'ti-folder')}"></span><span class="mv-opt-text">${qn ? mvSnippetHTML(c.name, [qn]) : esc(c.name)}</span>`;
+				this.addDestOpt(list, opt, () => this.movePages(c));
+			}
+		};
+		render('');
+		input.addEventListener('input', () => render(input.value.trim()));
+		input.addEventListener('keydown', (e) => {
+			if (e.key === 'ArrowDown') { e.preventDefault(); e.stopPropagation(); this.setDestSel(this.destSel + 1); }
+			else if (e.key === 'ArrowUp') { e.preventDefault(); e.stopPropagation(); this.setDestSel(this.destSel - 1); }
+			else if (e.key === 'Enter') {
+				e.preventDefault(); e.stopPropagation();
+				const o = this.destOpts[this.destSel];
+				if (o) o.pick();
+			}
+		});
+		this.outsideHandler = (e) => {
+			// closes only the picker — the selection mode (if any) stays active
+			if (this.popEl && !this.popEl.contains(e.target)) this.close(true);
+		};
+		document.addEventListener('pointerdown', this.outsideHandler, true);
+		setTimeout(() => input.focus(), 0);
+	}
+
+	async movePages(target) {
+		const pm = this.pageMode;
+		if (!pm || this.moving) return;
+		this.moving = true;
+		try {
+			const guids = [...pm.selected];
+			let moved = 0, firstMoved = null;
+			for (const g of guids) {
+				try {
+					const rec = this.data.getRecord(g);
+					if (!rec) continue;
+					const ok = await rec.moveToCollection(target.api);
+					if (ok) { moved++; if (!firstMoved) firstMoved = g; }
+				} catch (e) {}
+				await wait(60);
+			}
+			this.close(true);
+			const single = pm.single;
+			this.exitPageMode();
+			if (!moved) { this.toast('No pages were moved.'); return; }
+			this.toast(`Moved ${moved} page${moved > 1 ? 's' : ''} to ${target.name}.`, {
+				primaryLabel: 'Open',
+				onPrimary: () => {
+					try {
+						const panel = this.ui.getActivePanel();
+						const wsGuid = panel.getNavigation()?.workspaceGuid || null;
+						// single page → open it; several → their new collection view
+						if (single || moved === 1) panel.navigateTo({ type: 'edit_panel', rootId: firstMoved, subId: null, workspaceGuid: wsGuid });
+						else panel.navigateTo({ type: 'overview', rootId: target.guid, subId: null, workspaceGuid: wsGuid });
+					} catch (e) {}
+				},
+				autoDestroyTime: 6000,
+			});
+		} finally {
+			this.moving = false;
+		}
 	}
 }
 

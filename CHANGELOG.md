@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.3.0 — 2026-07-19
+
+- **Move whole pages between collections.** Open a collection as a table, board, or gallery, run **Move pages…** (or the shortcut), select rows/cards (shift-click for a range), and send them to another collection. Running it on a single open page moves just that page. Properties missing in the destination are hidden but kept.
+- **New note as a destination** for moving content: choose *New note in a collection…*, type a title, pick a collection, and the moved line/block/selection becomes the new note's body. Contributed by [@phildrysdale1](https://github.com/phildrysdale1) (#1).
+- In page-selection mode the shortcut now advances: press once to select, again (with a selection) to open the collection picker, or with nothing selected to exit. `Escape` and the **Cancel** button also exit.
+- New plugin icon, and every in-app icon swapped to ones Thymer's icon set actually renders (some were showing blank).
+
 ## v1.2.0 — 2026-07-11
 
 - The destination picker now looks and searches like Thymer's native command palette: the same surface, mono font, corner radius, selected-row accent, and crisp match highlight.

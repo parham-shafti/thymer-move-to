@@ -1,6 +1,5 @@
 .DS_Store
 *.mp4
-dev-cdp.mjs
-dev-key.mjs
+dev-*.mjs
 install.mjs
 SEARCH-PORT-HANDOVER.md
