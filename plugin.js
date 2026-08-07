@@ -77,8 +77,14 @@ const CSS = `
 .mv-opt-text b { color: var(--cmdpal-hilite-color, var(--color-blackwhite-0, #fff)); font-weight: var(--font-weight-bold, 700); }
 .mv-opt-sub { opacity: .55; font-size: 11.5px; flex: 0 0 auto; max-width: 170px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mv-sec { padding: 6px 12px 2px; font-size: 10.5px; letter-spacing: .04em; text-transform: uppercase; opacity: .45; }
-.mv-indent-1 { padding-left: 26px; }
-.mv-indent-2 { padding-left: 40px; }
+/* heading-level badge in the page outline ("H1"/"H2"/"H3"), sized to line up
+   with the icon column of the other rows */
+.mv-hlvl {
+	flex: 0 0 auto; min-width: 16px;
+	font-size: 10px; font-weight: var(--font-weight-bold, 700);
+	opacity: .5; letter-spacing: .03em;
+}
+.mv-opt.mv-active .mv-hlvl { opacity: .8; }
 .mv-linepreview {
 	/* above the picker (99999); appended to <body>, so it needs its own high z */
 	position: fixed; z-index: 100002; max-width: 440px; box-sizing: border-box;
@@ -710,8 +716,8 @@ class Plugin extends AppPlugin {
 		list.appendChild(h);
 	}
 
-	// collection guid -> {name, icon, isJournal, hidden, api}, for result labels
-	// and as the target list of the page-move collection picker
+	// collection guid -> {name, icon, isJournal, api}, for result labels and as
+	// the target list of the page-move collection picker
 	async loadCollMap() {
 		try {
 			const cols = await this.data.getAllCollections();
@@ -720,7 +726,10 @@ class Plugin extends AppPlugin {
 				let g = null; try { g = c._getRow ? c._getRow().guid : (c.guid || null); } catch (e) {}
 				if (!g && c.getGuid) { try { g = c.getGuid(); } catch (e) {} }
 				let n = ''; try { n = c.getName ? c.getName() : ''; } catch (e) {}
-				let ic = ''; try { ic = (c.getIcon && c.getIcon()) || ''; } catch (e) {}
+				// a collection's icon lives in its CONFIGURATION — there is no
+				// getIcon() on PluginCollectionAPI (it returns undefined), which is
+				// why every row used to fall back to a generic folder glyph
+				let ic = ''; try { ic = collIconFromConf(c.getConfiguration()); } catch (e) {}
 				let ij = false; try { ij = !!(c.isJournalPlugin && c.isJournalPlugin()); } catch (e) {}
 				let hid = false; try { const sd = (c.getConfiguration() || {}).sidebar_display_mode; hid = !!(sd && sd.mode === 'hidden_completely'); } catch (e) {}
 				if (g) m[g] = { name: n, icon: ic, isJournal: ij, hidden: hid, api: c };
@@ -833,13 +842,20 @@ class Plugin extends AppPlugin {
 		collections = (collections || []).filter((c) => {
 			try {
 				if (!c || typeof c.createRecord !== 'function') return false;
+				// journals own their pages by date, so a new note can't live there.
+				// Everything else is fair game: "hidden from sidebar" is a display
+				// preference, not a sign the collection is internal.
 				if (c.isJournalPlugin && c.isJournalPlugin()) return false;
-				// skip plugin-internal collections hidden from the sidebar (e.g. the
-				// Quick Capture scratch collection) — never a real note destination
-				const sd = (c.getConfiguration() || {}).sidebar_display_mode;
-				if (sd && sd.mode === 'hidden_completely') return false;
 				return true;
 			} catch (e) { return false; }
+		});
+		// alphabetical: this list is every collection in the workspace, so a stable
+		// order matters more than the API's arbitrary one
+		collections.sort((a, b) => {
+			let an = '', bn = '';
+			try { an = a.getName() || ''; } catch (e) {}
+			try { bn = b.getName() || ''; } catch (e) {}
+			return an.localeCompare(bn);
 		});
 
 		this.resetDestList(list);
@@ -859,10 +875,10 @@ class Plugin extends AppPlugin {
 		this.sec(list, 'Choose a collection');
 		let firstCollectionIdx = null;
 		for (const c of collections) {
-			let name = 'Collection', icon = 'ti-files';
+			let name = 'Collection', icon = '';
 			try { name = c.getName() || name; } catch (e) {}
-			try { const conf = c.getConfiguration(); icon = (c.getIcon && c.getIcon()) || (conf && conf.icon) || icon; } catch (e) {}
-			if (!icon.startsWith('ti-')) icon = 'ti-' + icon;
+			try { icon = collIconFromConf(c.getConfiguration()); } catch (e) {}
+			icon = icon || 'ti-folder';
 			const opt = document.createElement('div');
 			opt.className = 'mv-opt';
 			opt.innerHTML = `<span class="ti ${esc(icon)}"></span><span class="mv-opt-text">${esc(name)}</span>`;
@@ -1000,7 +1016,11 @@ class Plugin extends AppPlugin {
 		}
 		if (pages.length) {
 			this.sec(list, 'Pages');
-			for (const p of pages.slice(0, 12)) {
+			// Generous cap + a scrolling list. A tight cap silently hid real
+			// matches: searching "studio" in a big workspace returns 30+ pages, and
+			// titles matching mid-name (e.g. "Bygga en Studio") rank below every
+			// title that STARTS with the word, so they fell off the end.
+			for (const p of pages.slice(0, 40)) {
 				const coll = this.collName(p.collGuid);
 				const opt = document.createElement('div');
 				opt.className = 'mv-opt';
@@ -1011,7 +1031,7 @@ class Plugin extends AppPlugin {
 		}
 		if (lines.length) {
 			this.sec(list, 'Lines');
-			for (const l of lines.slice(0, 10)) {
+			for (const l of lines.slice(0, 20)) {
 				const coll = this.collName(l.collGuid);
 				const opt = document.createElement('div');
 				opt.className = 'mv-opt';
@@ -1033,9 +1053,7 @@ class Plugin extends AppPlugin {
 		let headings = [], hasContent = false;
 		try {
 			const items = await rec.getLineItems();
-			headings = items
-				.filter((li) => isHeading(li) && !moved.has(liGuid(li)))
-				.map((li) => ({ guid: liGuid(li), text: lineText(li), size: headingSize(li) }));
+			headings = outlineHeadings(items, guid, moved);
 			// real content (non-empty lines that aren't the ones being moved) makes
 			// Top vs Bottom a meaningful choice; an empty page makes them identical
 			hasContent = topLevelItems(items, guid).some((li) => !moved.has(liGuid(li)) && !isEmptyLine(li));
@@ -1058,8 +1076,12 @@ class Plugin extends AppPlugin {
 		for (const h of headings) {
 			if (!h.guid) continue;
 			const opt = document.createElement('div');
-			opt.className = 'mv-opt mv-indent-' + Math.min(2, Math.max(0, (h.size || 1) - 1));
-			opt.innerHTML = `<span class="ti ti-h-1"></span><span class="mv-opt-text">${esc(h.text || 'Heading')}</span>`;
+			opt.className = 'mv-opt';
+			// indent by the heading's real depth in the page outline (not by its
+			// H-size), so a heading nested under another is visibly subordinate
+			// even when both are the same size
+			opt.style.paddingLeft = (10 + Math.min(h.depth, 6) * 14) + 'px';
+			opt.innerHTML = `<span class="mv-hlvl">H${h.size}</span><span class="mv-opt-text">${esc(h.text || 'Heading')}</span>`;
 			this.addDestOpt(list, opt, () => this.moveNow({ kind: 'page', guid, name, afterHeadingGuid: h.guid, headingText: h.text }));
 		}
 		// keep Bottom highlighted as the default (Enter picks it) even though Top is first
@@ -1117,6 +1139,20 @@ class Plugin extends AppPlugin {
 		return null;
 	}
 
+	/* A journal day that has not MATERIALIZED yet (tomorrow and later) has a
+	 * SYNTHETIC page guid — S-<collectionGuid>-P…-YYYYMMDD — that
+	 * data.getRecord() cannot resolve, so moving a line OFF such a page died
+	 * with "Source page not found." Parse the date out of the S-guid and go in
+	 * through getJournalRecord (via resolveJournalRecord, whose ref carries the
+	 * USER guid — the collection guid silently creates a duplicate journal
+	 * page). Same fix as reschedule's journalRecord(). */
+	async journalRecordFromGuid(pageGuid) {
+		const m = /^S-([A-Z0-9]+)-.+-(\d{8})$/.exec(pageGuid || '');
+		if (!m) return null;
+		const y = +m[2].slice(0, 4), mo = +m[2].slice(4, 6) - 1, d = +m[2].slice(6, 8);
+		try { return await this.resolveJournalRecord({ toDate: () => new Date(y, mo, d) }); } catch (e) { return null; }
+	}
+
 	// ---- the move ---------------------------------------------------------------
 
 	async moveNow(dest) {
@@ -1132,7 +1168,8 @@ class Plugin extends AppPlugin {
 	async _moveNow(dest) {
 		const scope = this.scope;
 		const lineOnly = scope.hasChildren && !this.blockScope;
-		const srcRec = this.data.getRecord(scope.rguid);
+		let srcRec = this.data.getRecord(scope.rguid);
+		if (!srcRec) srcRec = await this.journalRecordFromGuid(scope.rguid);   // future journal day (synthetic S-guid)
 		if (!srcRec) { this.toast('Source page not found.'); this.close(); return; }
 		const srcItems = await srcRec.getLineItems();
 		const byGuid = new Map(srcItems.map((li) => [liGuid(li), li]));
@@ -1489,8 +1526,12 @@ class Plugin extends AppPlugin {
 		if (!pm || this.popEl) return;
 		if (!pm.selected.size) { this.toast('Select at least one page first.'); return; }
 
+		// Every collection that can hold a page, except journals (their pages are
+		// date-owned) and the one we're moving out of. NOTE: do NOT filter on
+		// `hidden` — "hide from sidebar" is a display preference, not a marker of
+		// an internal collection, and most of a real workspace can use it.
 		const cols = Object.entries(this.collMap)
-			.filter(([g, c]) => !c.isJournal && !c.hidden && g !== pm.collGuid && c.name)
+			.filter(([g, c]) => !c.isJournal && g !== pm.collGuid && c.name)
 			.map(([g, c]) => ({ guid: g, ...c }));
 		if (!cols.length) { this.toast('No other collections to move to.'); return; }
 
@@ -1534,7 +1575,9 @@ class Plugin extends AppPlugin {
 				return;
 			}
 			this.sec(list, 'Collections');
-			for (const c of hits.slice(0, 14)) {
+			// no small cap: a real workspace has dozens of collections and cutting
+			// the list made them look missing. The list scrolls.
+			for (const c of hits.slice(0, 200)) {
 				const opt = document.createElement('div');
 				opt.className = 'mv-opt';
 				opt.innerHTML = `<span class="ti ${esc(c.icon || 'ti-folder')}"></span><span class="mv-opt-text">${qn ? mvSnippetHTML(c.name, [qn]) : esc(c.name)}</span>`;
@@ -1599,11 +1642,20 @@ class Plugin extends AppPlugin {
 	}
 }
 
-// ---- helpers ----------------------------------------------------------------
-
+// <<<SHARED destination-picker — GENERATED, DO NOT EDIT HERE.
+// Source: shared/destination-picker.js  |  regenerate: node tools/sync-picker.mjs
 function wait(ms) { return new Promise((r) => setTimeout(r, ms)); }
 function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
 function rowGuid(o) { try { return o && o._getRow ? o._getRow().guid : null; } catch (e) { return null; } }
+// A collection's icon comes from its CONFIGURATION (`icon`); PluginCollectionAPI
+// has no getIcon(). Thymer also stores a few non-font "fill" icons (blinking-dot)
+// that it renders as CSS rather than a glyph — those would come out blank, so
+// only pass through real `ti-` classes and let the caller fall back.
+function collIconFromConf(conf) {
+	const ic = conf && conf.icon;
+	if (!ic || typeof ic !== 'string') return '';
+	return ic.startsWith('ti-') ? ic : '';
+}
 // Line items: the runtime accessors (getType/getParent/getHeadingSize) are
 // unreliable — read the raw row. Top-level when pguid === record guid.
 function liRaw(li) { try { return (li && li._getItem) ? (li._getItem() || {}) : {}; } catch (e) { return {}; } }
@@ -1617,6 +1669,35 @@ function lineText(li) {
 	let s = ''; for (let i = 0; i < ts.length; i += 2) s += String(ts[i + 1] || ''); return s.trim();
 }
 function topLevelItems(items, recGuid) { return (items || []).filter((li) => liRaw(li).pguid === recGuid); }
+// Build the page's heading outline: real document order + nesting depth.
+// getLineItems() is a FLAT list that is NOT in document order (every top-level
+// line comes first, then the children), so listing headings straight from it
+// puts nested ones at the end. It IS sibling-ordered within a single parent,
+// so regrouping by parent guid and walking depth-first restores the true order.
+// `depth` counts ANCESTOR HEADINGS, not raw tree depth, so the result reads as
+// an outline: two same-size headings where one sits under the other still come
+// out on different levels.
+function outlineHeadings(items, recGuid, skip) {
+	const kids = new Map();
+	for (const li of (items || [])) {
+		const pg = liRaw(li).pguid;
+		if (!pg) continue;
+		if (!kids.has(pg)) kids.set(pg, []);
+		kids.get(pg).push(li);
+	}
+	const out = [];
+	const walk = (parentGuid, depth) => {
+		for (const li of (kids.get(parentGuid) || [])) {
+			const g = liGuid(li);
+			if (!g) continue;
+			const isH = isHeading(li) && !(skip && skip.has(g));
+			if (isH) out.push({ guid: g, text: lineText(li), size: headingSize(li), depth });
+			walk(g, isH ? depth + 1 : depth);
+		}
+	};
+	walk(recGuid, 0);
+	return out;
+}
 function lastOf(arr) { return arr && arr.length ? arr[arr.length - 1] : null; }
 // The move target for "place directly after `target` at the same level":
 // the record when the target is top-level, else the target's parent line.
@@ -1699,3 +1780,4 @@ function segmentsFromState(state) {
 	for (let i = 0; i + 1 < ts.length; i += 2) segs.push({ type: String(ts[i]), text: ts[i + 1] });
 	return segs;
 }
+// >>>SHARED
