@@ -20,7 +20,7 @@ Put the caret on a line (or select several) and open the picker. What moves is c
 **Destinations:**
 
 - **Today's Journal** (default, just hit Enter), or type a date (`tomorrow`, `next friday`, `2026-07-20`) to move it into that day's Journal
-- **a new note in any collection** — type the title, then pick the collection
+- **a new note in any collection**: pick the collection, then name the page (the title starts out as the first line you move)
 - **any page**, at the top, at the bottom, or under a heading you pick
 - **any individual line**, anywhere in the workspace
 
