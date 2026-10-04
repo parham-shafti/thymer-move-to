@@ -2,6 +2,7 @@
 
 ## v1.3.1 - 2026-10-04
 
+- **New note in a collection** now takes two clear steps: first find and pick the collection (typing filters the list), then name the page. The title starts out as the first line you're moving; keep it and that line becomes the title instead of also staying in the body (only for a plain-text line without children). The old single field asked for a title while it looked like a collection search.
 - Fixed: **Nest under target** on a heading indents the moved content again. Since Thymer 1.0.20 a heading's content sits flush with the heading, so moved lines landed directly under it with no indent. They are now indented under the heading the way `Tab` does it, placed right below the heading.
 - Fixed: a page's headings are listed in their real order, indented by how they nest, and labelled with their real level (`H1`, `H2`, `H3`). Nested headings used to end up at the bottom of the list, and every row said H1.
 - Fixed: the collection lists (moving pages, and *New note in a collection…*) now include every collection, also ones hidden from the sidebar, each with its own icon. The new-note list is sorted by name, and the page-move search no longer stops at 14 collections.

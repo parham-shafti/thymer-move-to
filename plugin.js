@@ -204,7 +204,8 @@ class Plugin extends AppPlugin {
 	destOpts = [];
 	destSel = 0;
 	moving = false;
-	newNoteMode = false;    // picker is in "type a title for a new note" state (PR #1)
+	newNoteMode = false;    // picker is in the new-note steps (PR #1): pick a collection, then the title
+	newNoteFilter = null;   // repaints the collection list while step 1 is showing
 	collMap = {};           // collection guid -> {name, icon, isJournal} (built on picker open)
 	recordsCache = [];      // all workspace records, snapshotted on picker open
 	linePreviewEl = null;   // floating full-text preview shown on line hover
@@ -578,7 +579,7 @@ class Plugin extends AppPlugin {
 		this.renderDefaultDestOptions(list);
 		input.addEventListener('input', () => {
 			clearTimeout(this.searchTimer);
-			if (this.newNoteMode) return;   // in new-note mode the input is the note title, not a search
+			if (this.newNoteMode) { if (this.newNoteFilter) this.newNoteFilter(); return; }   // new note: filters the collections (step 1) or is the title (step 2)
 			const q = input.value.trim();
 			this.searchTimer = setTimeout(() => this.runDestSearch(q, list), 180);
 		});
@@ -674,6 +675,7 @@ class Plugin extends AppPlugin {
 		this.searchToken++;
 		this.destOpts = []; this.destSel = 0;
 		this.newNoteMode = false;
+		this.newNoteFilter = null;
 		this.hideLinePreview();
 		if (this.outsideHandler) { document.removeEventListener('pointerdown', this.outsideHandler, true); this.outsideHandler = null; }
 		if (this.popEl) { this.popEl.remove(); this.popEl = null; }
@@ -815,25 +817,30 @@ class Plugin extends AppPlugin {
 		this.addDestOpt(list, journal, () => this.moveNow({ kind: 'journal' }));
 		const newNote = document.createElement('div');
 		newNote.className = 'mv-opt';
-		newNote.innerHTML = `<span class="ti ti-file-plus"></span><span class="mv-opt-text">New note in a collection…</span>`;
+		newNote.innerHTML = `<span class="ti ti-file-plus"></span><span class="mv-opt-text">New note in a collection</span>`;
 		this.addDestOpt(list, newNote, () => this.pickNewNote(list));
 		this.sec(list, 'Type to search pages, lines, or a date');
 	}
 
-	// New-note flow (community PR #1, phildrysdale1): type a title, pick a
-	// collection, and the moved content becomes the body of a freshly created
-	// note in that collection.
+	// New-note flow (community PR #1, phildrysdale1), in two steps like
+	// Whiteboard's (his ruling 2026-10-04: the old single field asked for a title
+	// while it looked like it searched the collections):
+	//   1. find and pick the collection, the field filters the list;
+	//   2. the title, prefilled with the first moved line and selected, then
+	//      "Create page in <collection>" (Enter).
+	// Title left as prefilled = the first line BECOMES the title and leaves the
+	// body (only a plain-text line without children; anything else stays).
 	async pickNewNote(list) {
 		const input = this.popEl && this.popEl.querySelector('.mv-input');
 		if (!input) return;
 		clearTimeout(this.searchTimer);
 		const my = ++this.searchToken;
 		this.newNoteMode = true;
+		this.newNoteFilter = null;
 		input.value = '';
-		input.placeholder = 'Enter a title for the new note…';
+		input.placeholder = 'Find a collection';
 		this.resetDestList(list);
-		this.newNoteMode = true;   // resetDestList doesn't touch it, but keep intent explicit
-		this.sec(list, 'Loading collections…');
+		this.sec(list, 'Loading collections');
 		input.focus();
 
 		let collections = [];
@@ -858,43 +865,76 @@ class Plugin extends AppPlugin {
 			return an.localeCompare(bn);
 		});
 
+		const paint = () => {
+			const q = input.value.trim().toLowerCase();
+			this.resetDestList(list);
+			this.sec(list, 'New note');
+			const back = document.createElement('div');
+			back.className = 'mv-opt';
+			back.innerHTML = `<span class="ti ti-arrow-left"></span><span class="mv-opt-text">Back to destinations</span>`;
+			this.addDestOpt(list, back, () => {
+				this.newNoteMode = false;
+				this.newNoteFilter = null;
+				this.searchToken++;
+				input.value = '';
+				input.placeholder = 'Search pages, lines, or a date for the Journal (e.g. "tomorrow")…';
+				this.renderDefaultDestOptions(list);
+				input.focus();
+			});
+			const shown = collections.filter((c) => { try { return !q || (c.getName() || '').toLowerCase().includes(q); } catch (e) { return false; } });
+			this.sec(list, shown.length ? 'Choose a collection' : 'No collection matches');
+			for (const c of shown) {
+				let name = 'Collection', icon = '';
+				try { name = c.getName() || name; } catch (e) {}
+				try { icon = collIconFromConf(c.getConfiguration()); } catch (e) {}
+				icon = icon || 'ti-folder';
+				const opt = document.createElement('div');
+				opt.className = 'mv-opt';
+				opt.innerHTML = `<span class="ti ${esc(icon)}"></span><span class="mv-opt-text">${esc(name)}</span>`;
+				this.addDestOpt(list, opt, () => this.pickNewNoteTitle(list, c, name));
+			}
+			if (this.destOpts.length > 1) this.setDestSel(1);
+		};
+		this.newNoteFilter = paint;
+		paint();
+	}
+
+	pickNewNoteTitle(list, c, name) {
+		const input = this.popEl && this.popEl.querySelector('.mv-input');
+		if (!input) return;
+		this.newNoteFilter = null;
+		this.searchToken++;
+		const firstGuid = this.scope && this.scope.roots[0];
+		const first = this.plainLineTitle(firstGuid);
+		input.value = first;
+		input.placeholder = 'Title for the new page';
+		input.focus();
+		try { input.select(); } catch (e) {}
 		this.resetDestList(list);
-		this.newNoteMode = true;
-		this.sec(list, 'New note');
+		this.sec(list, 'New page in ' + name);
 		const back = document.createElement('div');
 		back.className = 'mv-opt';
-		back.innerHTML = `<span class="ti ti-arrow-left"></span><span class="mv-opt-text">Back to destinations</span>`;
-		this.addDestOpt(list, back, () => {
-			this.newNoteMode = false;
-			this.searchToken++;
-			input.value = '';
-			input.placeholder = 'Search pages, lines, or a date for the Journal (e.g. "tomorrow")…';
-			this.renderDefaultDestOptions(list);
-			input.focus();
+		back.innerHTML = `<span class="ti ti-arrow-left"></span><span class="mv-opt-text">Back to collections</span>`;
+		this.addDestOpt(list, back, () => this.pickNewNote(list));
+		const create = document.createElement('div');
+		create.className = 'mv-opt';
+		create.innerHTML = `<span class="ti ti-file-plus"></span><span class="mv-opt-text">Create page in ${esc(name)}</span>`;
+		this.addDestOpt(list, create, () => {
+			const title = input.value.trim();
+			if (!title) { this.toast('Type a title for the new page.'); input.focus(); return; }
+			const fromFirst = !!first && title === first;
+			this.moveNow({ kind: 'new', collection: c, name: title, collectionName: name, titleGuid: fromFirst ? firstGuid : null });
 		});
-		this.sec(list, 'Choose a collection');
-		let firstCollectionIdx = null;
-		for (const c of collections) {
-			let name = 'Collection', icon = '';
-			try { name = c.getName() || name; } catch (e) {}
-			try { icon = collIconFromConf(c.getConfiguration()); } catch (e) {}
-			icon = icon || 'ti-folder';
-			const opt = document.createElement('div');
-			opt.className = 'mv-opt';
-			opt.innerHTML = `<span class="ti ${esc(icon)}"></span><span class="mv-opt-text">${esc(name)}</span>`;
-			if (firstCollectionIdx === null) firstCollectionIdx = this.destOpts.length;
-			this.addDestOpt(list, opt, () => {
-				const title = input.value.trim();
-				if (!title) { this.toast('Enter a title for the new note.'); input.focus(); return; }
-				this.moveNow({ kind: 'new', collection: c, name: title, collectionName: name });
-			});
-		}
-		if (firstCollectionIdx === null) {
-			const empty = document.createElement('div'); empty.className = 'mv-opt'; empty.textContent = 'No collections available';
-			list.appendChild(empty);
-		} else {
-			this.setDestSel(firstCollectionIdx);
-		}
+		this.setDestSel(1);
+	}
+
+	// The text of a line when it is PLAIN text only (no refs, tags, dates or
+	// links, which a page title can't carry), else ''. Read from the live model.
+	plainLineTitle(guid) {
+		let segs = [];
+		try { segs = segmentsFromState(window.g_universe.itemsByGuid[guid]); } catch (e) { return ''; }
+		if (!segs.length || !segs.every((sg) => sg.type === 'text' && typeof sg.text === 'string')) return '';
+		return segs.map((sg) => sg.text).join('').trim().slice(0, 120);
 	}
 
 	// Search pages by NAME (over the snapshotted record set, like the native @
@@ -1281,6 +1321,15 @@ class Plugin extends AppPlugin {
 		// a heading's children render flush since Thymer 1.0.20: indent them the way Tab does
 		if (moved && isHeading(parentTarget)) {
 			await indentUnderHeading(liGuid(parentTarget), anchor ? liGuid(anchor) : null, scope.roots.filter((g) => movedGuids.has(g)));
+		}
+		// a new page titled by its first line: that line is the title now, so it
+		// leaves the body, unless it carries children (they need their parent)
+		if (moved && dest.kind === 'new' && dest.titleGuid && movedGuids.has(dest.titleGuid)) {
+			try {
+				const items = (await destRec.getLineItems()) || [];
+				const first = items.find((li) => liGuid(li) === dest.titleGuid);
+				if (first && !items.some((li) => liRaw(li).pguid === dest.titleGuid)) await first.delete();
+			} catch (e) {}
 		}
 
 		this.close();
