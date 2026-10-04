@@ -1,5 +1,14 @@
 # Changelog
 
+## v1.3.1 - 2026-10-04
+
+- Fixed: **Nest under target** on a heading indents the moved content again. Since Thymer 1.0.20 a heading's content sits flush with the heading, so moved lines landed directly under it with no indent. They are now indented under the heading the way `Tab` does it, placed right below the heading.
+- Fixed: a page's headings are listed in their real order, indented by how they nest, and labelled with their real level (`H1`, `H2`, `H3`). Nested headings used to end up at the bottom of the list, and every row said H1.
+- Fixed: the collection lists (moving pages, and *New note in a collection…*) now include every collection, also ones hidden from the sidebar, each with its own icon. The new-note list is sorted by name, and the page-move search no longer stops at 14 collections.
+- Search shows more results (up to 40 pages and 20 lines).
+- Fixed: moving a line off a future Journal day (tomorrow or later) no longer fails with "Source page not found".
+- Fixed: a rare case where sending to the Journal could create a misnamed Journal page.
+
 ## v1.3.0 — 2026-07-19
 
 - **Move whole pages between collections.** Open a collection as a table, board, or gallery, run **Move pages…** (or the shortcut), select rows/cards (shift-click for a range), and send them to another collection. Running it on a single open page moves just that page. Properties missing in the destination are hidden but kept.

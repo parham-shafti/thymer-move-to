@@ -1125,15 +1125,19 @@ class Plugin extends AppPlugin {
 	}
 
 	async currentUserGuid() {
+		// Every strategy must yield a STRING: ref.guid is interpolated into the
+		// journal record id, so an object here mints a page called
+		// S-<coll>-[object Object]-0-<date> that breaks Markdown Mirror sync.
+		const str = (g) => (typeof g === 'string' && g.length ? g : null);
 		try {
-			if (typeof window !== 'undefined' && window.g_universe && window.g_universe.userId) return window.g_universe.userId;
+			if (typeof window !== 'undefined' && window.g_universe && str(window.g_universe.userId)) return window.g_universe.userId;
 		} catch (e) {}
 		try {
 			const us = await this.data.getActiveUsers();
 			if (us && us.length) {
 				const self = us.find((u) => u && (u.is_self || (u._getRow && u._getRow().is_self))) || us[0];
 				const g = self && (self.guid || (self._getRow && self._getRow().guid));
-				if (g) return g;
+				if (str(g)) return g;
 			}
 		} catch (e) {}
 		return null;
@@ -1219,7 +1223,7 @@ class Plugin extends AppPlugin {
 					parentTarget = destRec; anchor = lastOf(topLevelItems(ditems, rowGuid(destRec)).filter(notMoved));
 					destLabel = dest.pageName || destLabel;
 				} else if (indent) {
-					parentTarget = target; anchor = lastOf(ditems.filter((li) => liRaw(li).pguid === dest.guid).filter(notMoved));
+					parentTarget = target; anchor = nestAnchor(ditems, target, movedSet);
 				} else {
 					parentTarget = siblingParent(ditems, target, destRec); anchor = target;
 				}
@@ -1235,7 +1239,7 @@ class Plugin extends AppPlugin {
 					if (!heading) {
 						parentTarget = destRec; anchor = lastOf(topLevelItems(ditems, rowGuid(destRec)).filter(notMoved));
 					} else if (indent) {
-						parentTarget = heading; anchor = lastOf(ditems.filter((li) => liRaw(li).pguid === dest.afterHeadingGuid).filter(notMoved));
+						parentTarget = heading; anchor = nestAnchor(ditems, heading, movedSet);
 					} else {
 						parentTarget = siblingParent(ditems, heading, destRec); anchor = heading;
 					}
@@ -1273,6 +1277,10 @@ class Plugin extends AppPlugin {
 		const order = [...roots].reverse();
 		for (const li of order) {
 			try { await li.move(parentTarget, anchor); moved++; movedGuids.add(liGuid(li)); await wait(40); } catch (e) {}
+		}
+		// a heading's children render flush since Thymer 1.0.20: indent them the way Tab does
+		if (moved && isHeading(parentTarget)) {
+			await indentUnderHeading(liGuid(parentTarget), anchor ? liGuid(anchor) : null, scope.roots.filter((g) => movedGuids.has(g)));
 		}
 
 		this.close();
@@ -1697,6 +1705,47 @@ function outlineHeadings(items, recGuid, skip) {
 	};
 	walk(recGuid, 0);
 	return out;
+}
+// Thymer 1.0.20 made headings own the lines that follow them and draws a
+// heading's children FLUSH with the heading, so nesting content under a heading
+// no longer shows as an indent. Thymer's own Tab indents such a line with
+// OVERINDENT (`oind`), but the public line.move() always writes oind 0. After the
+// move, re-issue each root's final position through the editor's mutation queue
+// with oind 1: exactly the mutation Tab produces. `guids` must be in final
+// document order, the first sitting right after `afterGuid` (null = first child).
+// The queue silently DROPS a mutation for a line the editor has not loaded (a
+// line moved off a page no panel shows, e.g. a Whiteboard card), so load each one
+// first with getOrLoadItem, the app's own loader.
+// The one helper here with a side effect, kept shared so the internal call lives
+// in one place. Best effort: without these internals the lines stay flush, which
+// is where move() already put them. Measured 2026-10-04, app 1.0.20.
+async function indentUnderHeading(headingGuid, afterGuid, guids) {
+	const ops = window.g_universe && window.g_universe.operations;
+	if (!headingGuid || !ops || typeof ops.enqueueMutation !== 'function') return false;
+	let after = afterGuid || null;
+	for (const g of (guids || [])) {
+		if (!g) continue;
+		try {
+			if (typeof ops.getOrLoadItem === 'function') await ops.getOrLoadItem(g);
+			ops.enqueueMutation({ action: 'move_tree', item_guid: g, value: [headingGuid, after, 1] });
+		} catch (e) { return false; }
+		after = g;
+	}
+	return true;
+}
+// The anchor for content nested under `target`. Under a plain line: after its
+// last child, as before. Under a HEADING: right below the heading, after any
+// lines already indented there. Thymer folds an indented line that follows a
+// FLUSH one into that line (measured 2026-10-04), so appending at the end of a
+// section would quietly make the content a child of whatever line ends it.
+// Directly under the heading the indent survives, exactly as Thymer's own Tab.
+function nestAnchor(items, target, skip) {
+	const tg = liGuid(target);
+	const kids = (items || []).filter((li) => liRaw(li).pguid === tg && !(skip && skip.has(liGuid(li))));
+	if (!isHeading(target)) return lastOf(kids);
+	let anchor = null;
+	for (const li of kids) { if ((liRaw(li).oind || 0) >= 1) anchor = li; else break; }
+	return anchor;
 }
 function lastOf(arr) { return arr && arr.length ? arr[arr.length - 1] : null; }
 // The move target for "place directly after `target` at the same level":
