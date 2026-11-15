@@ -185,6 +185,15 @@ function defaultHotkey() {
 	return { key: 'm', meta: mac, ctrl: !mac, shift: true, alt: false };
 }
 
+/* A line's page guid. Thymer stopped putting `rguid` on line state in itemsByGuid (2026-11-14):
+ * walk `.parent` to the root `document`, whose guid is the record guid (journal days too). */
+function mvRguid(st) {
+	if (!st) return null;
+	if (st.rguid) return st.rguid;
+	let n = st;
+	for (let i = 0; n.parent && i < 500; i++) n = n.parent;
+	return n !== st && n.type === 'document' ? n.guid : null;
+}
 class Plugin extends AppPlugin {
 
 	/* class fields so a stray onUnload() before onLoad() can't crash */
@@ -429,8 +438,7 @@ class Plugin extends AppPlugin {
 			lastGuid = posGuid(sel._range.last_pos) || caretGuid;
 		}
 
-		const st = u.itemsByGuid[firstGuid];
-		const rguid = st && st.rguid;
+		const rguid = mvRguid(u.itemsByGuid[firstGuid]);
 		if (!rguid) return null;
 
 		const order = this.docOrderGuids(rguid);
@@ -998,7 +1006,8 @@ class Plugin extends AppPlugin {
 			if (lines.length >= 40 || nowMs() - t0 > 150) break;
 			const it = byGuid[guid];
 			if (!it || it.is_deleted || it.is_trashed || it.type === 'document') continue;
-			if (!it.rguid) continue;
+			const pg = mvRguid(it);
+			if (!pg) continue;
 			const ts = it.text_segments;
 			if (!ts || !ts.length) continue;
 			let raw = '';
@@ -1006,8 +1015,8 @@ class Plugin extends AppPlugin {
 			const rawNorm = mvNorm(raw);
 			if (!parts.some((p) => rawNorm.includes(p))) continue;
 			considerLine(it.guid || guid, segmentsFromState(it), () => {
-				const r = this.data.getRecord(it.rguid);
-				return r ? { guid: it.rguid, name: r.getName && r.getName(), collGuid: this.collGuidOf(r) } : null;
+				const r = this.data.getRecord(pg);
+				return r ? { guid: pg, name: r.getName && r.getName(), collGuid: this.collGuidOf(r) } : null;
 			});
 		}
 		this.renderDestResults(list, pages, lines, parts, true, jdate);
