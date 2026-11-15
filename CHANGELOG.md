@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.3.2 - 2026-11-15
+
+- Fixed: **Move To works again after a Thymer update.** Thymer changed how a line knows which page it is on, so Move To could no longer find the page of the line under the caret and moved nothing. It finds the page again.
+- Fixed: lines you just typed show up again in the destination search, without waiting for Thymer's search index.
+
 ## v1.3.1 - 2026-10-04
 
 - **New note in a collection** now takes two clear steps: first find and pick the collection (typing filters the list), then name the page. The title starts out as the first line you're moving; keep it and that line becomes the title instead of also staying in the body (only for a plain-text line without children). The old single field asked for a title while it looked like a collection search.
